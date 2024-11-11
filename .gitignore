@@ -1,0 +1,10 @@
+*.pth
+*.png
+*.jpg
+*.txt
+*.jpeg
+events.out.*
+__pycache__/
+*.pyc
+output_dir_glcm_ssim_rgb_gbusv
+pretrained_ViT_base

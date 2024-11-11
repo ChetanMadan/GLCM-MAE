@@ -36,7 +36,7 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_vit
 
-from engine_finetune import train_one_epoch, evaluate
+from engine_finetune_gbcu import train_one_epoch, evaluate
 
 
 def get_args_parser():
@@ -318,7 +318,8 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir:
+        # if args.output_dir:
+        if args.output_dir and (epoch >= 50) and (epoch % 1 == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)

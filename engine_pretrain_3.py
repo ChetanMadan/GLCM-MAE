@@ -11,7 +11,7 @@
 import math
 import sys
 from typing import Iterable
-
+from adap_weight import aw_loss
 import torch
 
 import util.misc as misc
@@ -46,18 +46,19 @@ def train_one_epoch(overall_min, overall_max,
         samples = samples.to(device, non_blocking=True)
 
         with torch.cuda.amp.autocast():
-            loss, _, _ = model(samples, epoch, 200, mask_ratio=args.mask_ratio)
+            # loss, _, _ = model(samples, epoch, 200, mask_ratio=args.mask_ratio)
+            loss, pred, mask, adv_loss, corrupt_img = model(samples, epoch, 200, mask_ratio = args.mask_ratio)
             # loss, _, _ = model( samples, mask_ratio=args.mask_ratio)
+        gen_loss = aw_loss(loss, adv_loss, optimizer, model)
 
-
-        loss_value = loss.item()
+        loss_value = gen_loss.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        loss /= accum_iter
-        loss_scaler(loss, optimizer, parameters=model.parameters(),
+        gen_loss /= accum_iter
+        loss_scaler(gen_loss, optimizer, parameters=model.parameters(),
                     update_grad=(data_iter_step + 1) % accum_iter == 0)
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
@@ -67,6 +68,7 @@ def train_one_epoch(overall_min, overall_max,
         metric_logger.update(loss=loss_value)
 
         lr = optimizer.param_groups[0]["lr"]
+        # lr = 
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)

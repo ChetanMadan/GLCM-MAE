@@ -10,9 +10,13 @@
 # --------------------------------------------------------
 
 from functools import partial
+import numpy as np
+import cv2
 
 import torch
+from torch import sigmoid
 import torch.nn as nn
+import einops
 
 from timm.models.vision_transformer import PatchEmbed, Block
 
@@ -27,6 +31,15 @@ class MaskedAutoencoderViT(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
         super().__init__()
+        
+        self.bin_num = 256
+        self.i = 17670
+        self.min_val = -2.1179039478302
+        self.max_val = 2.640000104904175
+        self.interval_length = (self.max_val - self.min_val) / self.bin_num
+        self.kernel_width = self.interval_length / (30)
+        self.device = 'cuda:0'
+
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
@@ -49,8 +62,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
-        self.get_decoder_depth = decoder_depth
-        print("decoder_depth-> ",decoder_depth)
+
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
             for i in range(decoder_depth)])
@@ -120,6 +132,29 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
         return imgs
+    
+    def custom_unpatchify(self, x):
+        """
+        x: (N, L, patch_size**2 *3) # (64, 196, 768) -> (64, 196, 3 , 16 , 16)
+        imgs: (N, 3, H, W)
+        """
+        p = self.patch_embed.patch_size[0]
+        h = w = int(x.shape[1]**.5)
+        assert h * w == x.shape[1]
+        # print("x0->", x.shape)
+        
+        # x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
+        x = x.reshape(shape=(x.shape[0], -1, p, p, 3))
+
+        # print("x1->", x.shape)
+        # x = torch.einsum('nhwpqc->nchpwq', x)
+        x = torch.einsum('nlpqc->nlcpq', x)
+
+        # print("x2->", x.shape)
+        # imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
+        # print("imgs->", imgs.shape)
+        return x
+
 
     def random_masking(self, x, mask_ratio):
         """
@@ -173,7 +208,6 @@ class MaskedAutoencoderViT(nn.Module):
     def forward_decoder(self, x, ids_restore):
         # embed tokens
         x = self.decoder_embed(x)
-        print("decoder Depth->", self.get_decoder_depth)
 
         # append mask tokens to sequence
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
@@ -194,25 +228,215 @@ class MaskedAutoencoderViT(nn.Module):
 
         # remove cls token
         x = x[:, 1:, :]
+        
+        # experimental Idea(not working)
+        # x = torch.tanh(x) 
 
         return x
+    
+    def activation_func(self, img_flat, bins_av):
+        # torch.set_default_device(self.device)
+
+        img_minus_bins_av = torch.sub(img_flat, bins_av)  # shape=  (batch_size,H*W,bin_num)
+        img_plus_bins_av = torch.add(img_flat, bins_av)  # shape = (batch_size,H*W,bin_num)
+        # print("img_minus_bins_av", img_minus_bins_av.shape)
+        
+        maps = sigmoid((img_minus_bins_av + self.interval_length / 2) / self.kernel_width) \
+               - sigmoid((img_minus_bins_av - self.interval_length / 2) / self.kernel_width) \
+               + sigmoid((img_plus_bins_av - 2 * self.min_val + self.interval_length / 2) / self.kernel_width) \
+               - sigmoid((img_plus_bins_av - 2 * self.min_val - self.interval_length / 2) / self.kernel_width) \
+               + sigmoid((img_plus_bins_av - 2 * self.max_val + self.interval_length / 2) / self.kernel_width) \
+               - sigmoid((img_plus_bins_av - 2 * self.max_val - self.interval_length / 2) / self.kernel_width)
+        # print("maps->" , maps.shape)
+        return maps
+    
+    
+    def calc_activation_maps(self, img):
+        # apply approximated shifted rect (bin_num) functions on img
+        # torch.set_default_device(self.device)
+        
+        bins_min_max = np.linspace(self.min_val, self.max_val, self.bin_num + 1)
+        bins_av = (bins_min_max[0:-1] + bins_min_max[1:]) / 2
+        bins_av = torch.tensor(bins_av, device=img.device, dtype = torch.float32)  # shape = (,bin_num)
+        bins_av = torch.unsqueeze(bins_av, 0)  # shape = (1,bin_num)
+        bins_av = torch.unsqueeze(bins_av, 0)  # shape = (1,1,bin_num)
+        bins_av = torch.unsqueeze(bins_av, 0)  # shape = (1,1,1,bin_num)
+
+        # m = nn.Flatten()
+        m = nn.Flatten(2, -1)
+
+        img_flat = torch.unsqueeze(m(img), -1)
+        # print("img_flat->", img_flat.shape)
+        maps = self.activation_func(img_flat, bins_av)  # shape = (batch_size,H*W,bin_num)
+        return maps
+
+    def calc_glcm_maps(self, img):
+        # hist_row = self.calc_activation_maps(img[:,:,:-1])
+        hist_row = self.calc_activation_maps(img[:,:,:,:-1])
+        # hist_shift_row = self.calc_activation_maps(img[:,:,1:])
+        hist_shift_row = self.calc_activation_maps(img[:,:,:,1:])
+
+        # glcm_row = torch.bmm(hist_row.permute(0, 2, 1), hist_shift_row)
+        # glcm_row = torch.bmm(hist_row.permute(0, 1, 3, 2), hist_shift_row)
+        glcm_row = torch.matmul(hist_row.permute(0, 1, 3, 2), hist_shift_row)
+        
+        #verify the multiplciation
+        
+        # hist_col = self.calc_activation_maps(img[:,:-1,:])
+        hist_col = self.calc_activation_maps(img[:,:,:-1,:])
+
+        # hist_shift_col = self.calc_activation_maps(img[:,1:,:])
+        hist_shift_col = self.calc_activation_maps(img[:,:,1:,:])
+
+        # glcm_col = torch.bmm(hist_col.permute(0, 2, 1), hist_shift_col)
+        # glcm_col = torch.bmm(hist_col.permute(0, 1, 3, 2), hist_shift_col)
+        glcm_col = torch.matmul(hist_col.permute(0, 1, 3, 2), hist_shift_col)
+
+        #check if needed or not
+        x = torch.einsum('nblxy-> blnxy', torch.stack([glcm_row, glcm_col]))
+        # print("final glcm shape-> ", x.shape)
+        
+        return x 
+
+        
+    # def xlogy(self, x, y):
+    #     z = torch.zeros(())
+    #     # if torch.device.type == "cuda":
+    #     z = z.to(self.device)
+            
+    #     print(x.get_device(), y.get_device(), z.get_device())
+
+    #     return x * torch.where(x == 0., z, torch.log(y))
+
+    def calc_cond_entropy_loss(self, maps_x, maps_y):
+        # torch.set_default_device(self.device)
+
+        pxy = torch.matmul(maps_x.permute(0,1,3,2), maps_y) / maps_x.shape[2]
+        pxy = pxy.to(maps_x.device)
+        py = torch.sum(pxy, 2)
+        # py = py.to(self.device)
+        # calc conditional entropy: H(X|Y)=-sum_(x,y) p(x,y)log(p(x,y)/p(y))
+        hy = torch.sum(torch.xlogy(py, py), 2)
+        hxy = torch.sum(torch.xlogy(pxy, pxy), [2, 3])
+        cond_entropy = hy - hxy
+        print("cond_entropy_shape-> ", cond_entropy.shape)
+        # mean_cond_entropy = torch.mean(cond_entropy)
+        # return mean_cond_entropy
+        return cond_entropy
+    
+    def calc_out_tar_map(self, out, tar):
+        maps_out = self.calc_activation_maps(out)
+        maps_tar = self.calc_activation_maps(tar)
+        
+        return maps_out, maps_tar
+    
+    def calc_glcm_out_tar(self, tar, out):
+        glcm_tar = self.calc_glcm_maps(tar)
+        glcm_out = self.calc_glcm_maps(out)
+        
+        return glcm_tar, glcm_out
 
     def forward_loss(self, imgs, pred, mask):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
         mask: [N, L], 0 is keep, 1 is remove, 
+    
         """
+        
+        self.i += 1
+        
+        print("imgs shape-> ", imgs.shape)
+            
         target = self.patchify(imgs)
+        
+        #RGB loss
+        loss_rgb = (pred - target) ** 2
+        loss_rgb = loss_rgb.mean(dim=-1)  # [N, L], mean loss_rgb per patch
+
+        loss_rgb = (loss_rgb * mask).sum() / mask.sum()  # mean loss on removed patches
+        
+        pred_unpatch = self.custom_unpatchify(pred)
+        target = self.custom_unpatchify(target)
+
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
+        
+            
+        # print("Mask -> ", mask.shape)
+        # print("Pred -> ", pred.shape)
+        # print("Pred Unpatch ->", pred_unpatch.shape)
+        # print("Target Unpatch-> ", target.shape)
+        
+        # plot pred_unpatch and target
+        
+        # pred_unpatch
+        
+    
+        
+        
+        pred_unpatch = torch.clamp(pred_unpatch, min=-2.1179039478302, max=2.640000104904175)
+        glcm_1 = self.calc_glcm_out_tar(pred_unpatch[:,:,0,:,:], target[:,:,0,:,:])
+        # glcm_2 = self.calc_glcm_out_tar(pred_unpatch[:,:,1,:,:], target[:,:,1,:,:])
+        # glcm_3 = self.calc_glcm_out_tar(pred_unpatch[:,:,2,:,:], target[:,:,2,:,:])
 
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        # loss_1 = self.calc_cond_entropy_loss(glcm_1[0][:,:,0,:,:], glcm_1[1][:,:,0,:,:])
+        # loss_2 = self.calc_cond_entropy_loss(glcm_1[0][:,:,1,:,:], glcm_1[1][:,:,1,:,:])
 
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        
+        loss_glcm = (glcm_1[0] - glcm_1[1]) ** 2
+        # loss_glcm = (glcm_1[0] - glcm_1[1]) 
+
+
+        loss_glcm = einops.rearrange(loss_glcm, 'b l n x y -> b l (n x y)')
+        # print("final loss_glcm shape->", loss_glcm.shape)
+        # loss_glcm = (pred - target) ** 2
+        loss_glcm = loss_glcm.mean(dim=-1)  # [N, L], mean loss_glcm per patch
+
+        loss_glcm = (loss_glcm * mask).sum() / mask.sum()  # mean loss on removed patches
+        
+        # loss_1 = (loss_1 * mask).sum() / mask.sum()  # mean loss on removed patches
+        # loss_2 = (loss_2 * mask).sum() / mask.sum()  # mean loss on removed patches
+
+        loss = (loss_rgb + loss_glcm) / 2
+        
+        y = self.unpatchify(pred)
+        y = torch.einsum('nchw->nhwc', y).detach().cpu()
+        
+        mask = mask.detach()
+        mask = mask.unsqueeze(-1).repeat(1, 1, self.patch_embed.patch_size[0]**2 *3)  # (N, H*W, p*p*3)
+        mask = self.unpatchify(mask)  # 1 is removing, 0 is keeping
+        mask = torch.einsum('nchw->nhwc', mask).detach().cpu()
+        
+        x = torch.einsum('nchw->nhwc', imgs)
+        x = x.to('cpu')
+
+        # masked image
+        im_masked = x * (1 - mask)
+
+        # MAE reconstruction pasted with visible patches
+        im_paste = x * (1 - mask) + y * mask
+        
+        print(f"pred min-> {pred_unpatch.min()}, pred max-> {pred_unpatch.max()}")
+        print(f"img min-> {target.min()}, img max-> {target.max()}")
+
+
+        to_write = x[0].detach().cpu().numpy()
+        to_write_rec = (y[0].detach().cpu().numpy())
+        to_write_rec_original = im_paste[0].numpy()
+        
+        to_write = (((to_write - to_write.min()) / (to_write.max() - to_write.min())) * 255.9)
+        to_write_rec = (((to_write_rec - to_write_rec.min()) / (to_write_rec.max() - to_write_rec.min())) * 255.9)
+        to_write_rec_original = (((to_write_rec_original - to_write_rec_original.min()) / (to_write_rec_original.max() - to_write_rec_original.min())) * 255.9)
+        
+        if self.i % 10 == 0:
+
+            cv2.imwrite(f"generated_glcm_patch_and_rbg/{self.i}.png", to_write)
+            cv2.imwrite(f"generated_glcm_patch_and_rbg/{self.i}_rec.png", to_write_rec)
+            cv2.imwrite(f"generated_glcm_patch_and_rbg/{self.i}_rec_original.png", to_write_rec_original)
+
         return loss
 
     def forward(self, imgs, mask_ratio=0.75):
@@ -229,26 +453,6 @@ def mae_vit_base_patch16_dec512d8b(**kwargs):
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
-def mae_vit_base_patch16_decoder_4(**kwargs):
-    model = MaskedAutoencoderViT(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
-        decoder_embed_dim=512, decoder_depth=4, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-def mae_vit_base_patch16_decoder_6(**kwargs):
-    model = MaskedAutoencoderViT(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
-        decoder_embed_dim=512, decoder_depth=6, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-def mae_vit_base_patch16_decoder_10(**kwargs):
-    model = MaskedAutoencoderViT(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
-        decoder_embed_dim=512, decoder_depth=10, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
 
 def mae_vit_large_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
@@ -256,6 +460,7 @@ def mae_vit_large_patch16_dec512d8b(**kwargs):
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
+
 
 def mae_vit_huge_patch14_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
@@ -267,8 +472,5 @@ def mae_vit_huge_patch14_dec512d8b(**kwargs):
 
 # set recommended archs
 mae_vit_base_patch16 = mae_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
-mae_vit_base_patch16_d_4= mae_vit_base_patch16_decoder_4  # decoder: 512 dim, 8 blocks
-mae_vit_base_patch16_d_6 = mae_vit_base_patch16_decoder_6  # decoder: 512 dim, 8 blocks
-mae_vit_base_patch16_d_10 = mae_vit_base_patch16_decoder_10  # decoder: 512 dim, 8 blocks
 mae_vit_large_patch16 = mae_vit_large_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
 mae_vit_huge_patch14 = mae_vit_huge_patch14_dec512d8b  # decoder: 512 dim, 8 blocks

@@ -30,15 +30,15 @@ import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-import models_mae
-# import models_mae_all_gbcu
+# import models_mae
+import models_mae_all_gbcu_2
 # import models_mae_hist
 # import models_mae_hist_MSssim_rgb
 # import models_mae_hist_scaed
 # import models_mae_hist_2
 
 
-from engine_pretrain_2 import train_one_epoch
+from engine_pretrain import train_one_epoch
 
 
 def get_args_parser():
@@ -173,15 +173,13 @@ def main(args):
     print("overall_max", overall_max)
     
     # define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
+    # model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
     # model = models_mae_hist.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
     # model = models_mae_hist_ssim_rgb.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
-    # model = models_mae_all_gbcu.__dict__[args.mo
-    # del](norm_pix_loss=args.norm_pix_loss, overall_min=overall_min, overall_max=overall_max)
+    model = models_mae_all_gbcu_2.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, overall_min=overall_min, overall_max=overall_max)
+    # model = models_mae_all_gbcu_2.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, overall_min=overall_min, overall_max=overall_max)
     # model = models_mae_hist_MSssim_rgb.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, overall_min=overall_min, overall_max=overall_max)
     # model = models_mae_hist_2.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
-
-
 
     model.to(device)
 
@@ -224,7 +222,7 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and (epoch % 199 == 0 or epoch + 1 == args.epochs):
+        if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)

@@ -16,15 +16,38 @@ from torchvision import datasets, transforms
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
+class ImageFolderWithPaths(datasets.ImageFolder):
+    """Custom dataset that includes image file paths. Extends
+    torchvision.datasets.ImageFolder
+    """
+
+    # override the __getitem__ method. this is the method that dataloader calls
+    def __getitem__(self, index):
+        # this is what ImageFolder normally returns 
+        original_tuple = super(ImageFolderWithPaths, self).__getitem__(index)
+        # the image file path
+        path = self.imgs[index][0]
+        # make a new tuple that includes original and the path
+        tuple_with_path = (original_tuple + (path,))
+        return tuple_with_path
+
+
 
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
     root = os.path.join(args.data_path, 'train' if is_train else 'val')
-    dataset = datasets.ImageFolder(root, transform=transform)
+    if not is_train:
+        dataset = ImageFolderWithPaths(root, transform=transform)
+    else:
+        dataset = datasets.ImageFolder(root, transform=transform)
 
-    print(dataset)
+    # samples = dataset.samples
 
+    # print(dataset)
+
+    # if(not is_train):
+    #     return (dataset, samples)
     return dataset
 
 
