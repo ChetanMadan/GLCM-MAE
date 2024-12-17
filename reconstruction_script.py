@@ -41,6 +41,8 @@ def prepare_model(chkpt_dir, data_dir, arch='mae_vit_base_patch16'):
 
 def get_reconstructions(chkpt_dir, data_dir, save_dir):
     img_path = get_image_paths_from_dir(data_dir)
+    # img_path = ["/home/aarjav/scratch/busi/splits/imgs/benign_22.png", "/home/aarjav/scratch/busi/splits/imgs/benign_23.png", "/home/aarjav/scratch/busi/splits/imgs/benign_24.png", "/home/aarjav/scratch/busi/splits/imgs/benign_38.png", "/home/aarjav/scratch/busi/splits/imgs/malignant_34.png", "/home/aarjav/scratch/busi/splits/imgs/malignant_61.png"]
+    # img_path = ["/home/aarjav/scratch/gbcu_data/imgs/images/im00064.jpg", "/home/aarjav/scratch/gbcu_data/imgs/images/im00027.jpg", "/home/aarjav/scratch/gbcu_data/imgs/images/im00512.jpg", "/home/aarjav/scratch/gbcu_data/imgs/images/im01117.jpg"]
     model = prepare_model(chkpt_dir, 'mae_vit_base_patch16')
     
     os.makedirs(save_dir, exist_ok=True)

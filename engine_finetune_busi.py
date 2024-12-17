@@ -10,6 +10,7 @@
 # --------------------------------------------------------
 
 import math
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import sys
 from typing import Iterable, Optional
 
@@ -41,7 +42,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (samples, targets, paths) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -107,20 +108,23 @@ def evaluate(data_loader, model, device):
     model.eval()
     TP, TN, FP, FN = 0, 0, 0, 0
     TP_slice, TN_slice, FP_slice, FN_slice = 0, 0, 0, 0
-    # cap_total, cap_correct, normal_total, normal_correct, covid_total, covid_correct = 0, 0, 0, 0, 0, 0
-    
 
     dict_correct = defaultdict(int)
     dict_total = defaultdict(int)
     dict_label = defaultdict(int)
-
+    dict_pred = defaultdict(int)
+    ss_target = []
+    ss_pred = []
     
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
         target = batch[1]
         
         # cases = [single_case.split('/')[-1].split('_')[0].split('case')[-1] for single_case in batch[2]]
-        cases = [single_case.split('/')[-1].split('slice')[0] for single_case in batch[2]]
+        # cases = [''.join(single_case.split('/')[-1].split('-')[:-1]) for single_case in batch[2]]
+        cases = [single_case.split('/')[-1] for single_case in batch[2]]
+
+        # cases_x = batch[2]
 
         # print(cases)
         
@@ -135,52 +139,35 @@ def evaluate(data_loader, model, device):
         with torch.cuda.amp.autocast():
             output = model(images)
             # print("Target-> ", target)
-            # print("output->", output)
+            ss = torch.argmax(output, dim=1)
+            # print("output->", torch.argmax(output, dim=1))
+            ss_pred.extend(ss.detach().cpu().numpy())
+            ss_target.extend(target.detach().cpu().numpy())
             
             for i in range(len(cases)):
                 dict_total[cases[i]] += 1
-                if(target[i] == 0 and output[i][0] > output[i][1]):
+                print("case -> ", cases[i])
+                # print(target[i], cases_x[i])
+
+                if((target[i] == 0 or target[i] == 2) and (ss[i]==2 or ss[i]==0)):
                     dict_correct[cases[i]] += 1 
+                    # print("xxxxx ", target[i], ss[i])
                     TN_slice += 1
-                elif(target[i] == 1 and output[i][1] > output[i][0]):
+                elif(target[i] == 1 and ss[i]==1):
+                    # print("xxxxx ", target[i], ss[i])
                     dict_correct[cases[i]] += 1
                     TP_slice += 1
-                elif(target[i] == 0 and output[i][0] < output[i][1]):
+                elif((target[i] == 0 or target[i] == 2) and ss[i] == 1):
+                    # print("xxxxx ", target[i], ss[i])
                     FP_slice += 1
-                else:
+                elif(target[i] == 1 and (ss[i] ==0 or ss[i]==2)):
+                    # print("xxxxx ", target[i], ss[i])
                     FN_slice +=1 
-            
-            # for i in range(len(cases)):
-            #     # print("cases-> ", cases[i][0])
-            #     if(cases[i][0] == 'P'):
-            #         covid_total += 1
-            #         # print("output->", output[i])
-            #         if(target[i] == 1 and output[i][1] == max(output[i][0], output[i][1], output[i][2])):
-            #             covid_correct += 1
-            #             TP += 1
-            #         else:
-            #             FN += 1
-            #     elif(cases[i][0] == 'c'):
-            #         cap_total += 1
-            #         if(target[i] == 0 and output[i][0] == max(output[i][0], output[i][1], output[i][2])):
-            #             cap_correct += 1
-            #         if(target[i] == 0 and (output[i][0] == max(output[i][0], output[i][1], output[i][2]) or output[i][2] == max(output[i][0], output[i][1], output[i][2]))):
-            #             TN += 1
-            #         else:
-            #             FP += 1
-            #     elif(cases[i][0] == 'n'):
-            #         # print("target->", target[i])
+                else:
+                    print(target[i], ss[i])
+                    print("SOMETHING WENT HORRIBLY WRONG", target[i], ss[i])
 
-            #         normal_total += 1
-            #         if(target[i] == 2 and output[i][2] == max(output[i][0], output[i][1], output[i][2])):
-            #             normal_correct += 1
-            #         if(target[i] == 2 and (output[i][2] == max(output[i][0], output[i][1], output[i][2]) or output[i][0] == max(output[i][0], output[i][1], output[i][2]))):
-            #             TN += 1
-            #         else:
-            #             FP += 1
-                        
-            # for i in range(len(cases)):
-                
+                    
                     
 
             loss = criterion(output, target)
@@ -195,58 +182,37 @@ def evaluate(data_loader, model, device):
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    
-    threshold = 0.25
-    
-    for cases in dict_total:
-        if(dict_correct[cases] / dict_total[cases] >= (1 - threshold) and dict_label[cases] == 0):
-            TN += 1
-        elif(dict_correct[cases] / dict_total[cases] >= threshold and dict_label[cases] == 1):
-            TP += 1
-        elif(dict_correct[cases] / dict_total[cases] < (1 - threshold) and dict_label[cases] == 0):
-            FP += 1
-        else :
-            FN += 1
-    cm = [[TN, FP], [FN, TP]]
+    print(ss_pred, ss_target)
+    # print("wefffffffffffffffff", confusion_matrix(ss_target, ss_pred))
+    threshold = 0.10
+    # for cases in dict_total:
+    #     if(dict_correct[cases] / dict_total[cases] >= 1 - threshold and (dict_label[cases] == 0 or dict_label[cases] == 2)):
+    #         TN += 1
+    #     elif(dict_correct[cases] / dict_total[cases] >= threshold and dict_label[cases] == 1):
+    #         TP += 1
+    #     elif(dict_correct[cases] / dict_total[cases] < 1 - threshold and dict_label[cases] == 1):
+    #         FN += 1
+    #     else :
+    #         FP += 1
+    # cm = [[TN, FP], [FN, TP]]
     cm_slice = [[TN_slice, FP_slice], [FN_slice, TP_slice]]
 
     
-    sensitivity = TP / float(TP + FN)
-    specificity = TN / float(TN + FP)
+    # sensitivity = TP / float(TP + FN)
+    # specificity = TN / float(TN + FP)
     
     sensitivity_slice = TP_slice / float(TP_slice + FN_slice)
     specificity_slice = TN_slice / float(TN_slice + FP_slice)
-    print("Confusion Matix case wise-> ", cm)
-    print("Specificity Case -> ", specificity)
-    print("Sensitivity Case -> ", sensitivity)
+    # print("Confusion Matix case wise-> ", cm)
+    # print("Specificity Case -> ", specificity)
+    # print("Sensitivity Case -> ", sensitivity)
+    # print("Acc(case) -> ", (TP + TN) / (TP + TN + FN + FP))
+
     
     print("Confusion Matix slice wise-> ", cm_slice)
     print("Specificity Slice-> ", specificity_slice)
     print("Sensitivity Slice-> ", sensitivity_slice)
-    # normal, cap, covid = 0,0,0
-    # try:
-    #     normal = normal_correct / normal_total 
-    # except ZeroDivisionError:
-    #     normal = 0
-    # try:
-    #     cap = cap_correct / cap_total 
-    # except ZeroDivisionError:
-    #     cap = 0
-    # try:
-    #     covid = covid_correct / covid_total 
-    # except ZeroDivisionError:
-    #     covid = 0
-
-    # sensitivity = TP / (TP + FN)
-    # specificify = TN / (TN + FP)
-    # print("sensitivity -> ", sensitivity)
-    # print("specificify -> ", specificify)
-
-    # print(f"Covid Total -> {covid_total}, Cap Total -> {cap_total}, Normal Total -> {normal_total}")
-
-    # print(f"Covid Correct -> {covid_correct}, Cap Correct -> {cap_correct}, Normal Correct -> {normal_correct}")
-
-    # print(f"Covid Correct Ratio -> {covid}, Cap Correct Ratio -> {cap}, Normal Correct Ratio -> {normal}")
+    print("Acc(silce) -> ", (TP_slice + TN_slice) / (TP_slice + TN_slice + FN_slice + FP_slice))
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
