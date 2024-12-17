@@ -427,14 +427,14 @@ class MaskedAutoencoderViT(nn.Module):
         ssim_loss = torch.unsqueeze(ssim_loss, dim=-1)
         
         # ----------------------------------------------------------------------------------------------------->
-        # for i in range(1, img_norm.shape[0]):
-        #     ssim_loss_new = self.ssim(img_norm[i], preds_norm[i])
-        #     ssim_loss_new = torch.unsqueeze(ssim_loss_new, dim=-1)
+        for i in range(1, img_norm.shape[0]):
+            ssim_loss_new = self.ssim(img_norm[i], preds_norm[i])
+            ssim_loss_new = torch.unsqueeze(ssim_loss_new, dim=-1)
 
-        #     ssim_loss = torch.concat([ssim_loss, ssim_loss_new], dim=-1)
-        # # ssim_loss = ssim_loss.mean(dim=-1)  # [N, L], mean loss_glcm per patch
+            ssim_loss = torch.concat([ssim_loss, ssim_loss_new], dim=-1)
+        # ssim_loss = ssim_loss.mean(dim=-1)  # [N, L], mean loss_glcm per patch
 
-        # ssim_loss = (ssim_loss * mask).sum() / mask.sum()  
+        ssim_loss = (ssim_loss * mask).sum() / mask.sum()  
         # ----------------------------------------------------------------------------------------------------->
         
         # print("ssim_loss shape-> ", ssim_loss.shape)
@@ -529,8 +529,8 @@ class MaskedAutoencoderViT(nn.Module):
             # cv2.imwrite(f"generated/models_mae_hist_ssim_rgb_gbcu/{self.i}_rec.png", to_write_rec)
             # cv2.imwrite(f"generated/models_mae_hist_ssim_rgb_gbcu/{self.i}_rec_original.png", to_write_rec_original)
 
-        # return loss + ssim_loss + 0.1*loss_rgb
-        return loss + 0.1*loss_rgb
+        return loss + ssim_loss + 0.1*loss_rgb
+        # return loss + 0.1*loss_rgb
 
 
     def forward(self, imgs, epoch, max_epochs, mask_ratio=0.75):
